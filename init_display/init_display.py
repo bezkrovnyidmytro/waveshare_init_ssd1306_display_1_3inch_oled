@@ -10,13 +10,14 @@ import psutil
 import struct
 import smbus
 import gpiod
+import re
 from PIL import Image, ImageDraw, ImageFont
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 
 # Constants
-FONT_SIZE = 12
+FONT_SIZE = 11
 LEFT_PADDING = 1
 SM_BUS = 1
 PLD_PIN = 6
@@ -66,21 +67,25 @@ def get_system_info():
     """Fetch current time, CPU temperature, CPU and memory usage."""
     current_time = datetime.datetime.now().strftime('%d-%m-%y %H:%M')
     cpu_temp = subprocess.check_output(['vcgencmd', 'measure_temp']).decode("utf-8").strip().replace('temp=', 't: ').upper()
-    cpu_usage = f'CPU: {psutil.cpu_percent(interval=1)}%'
+    cpu_usage = f'CPU: {psutil.cpu_percent(interval=None)}%'
     mem_usage = f'MEM: {psutil.virtual_memory().percent}%'
     return current_time, cpu_temp, cpu_usage, mem_usage
 
-def draw_display(current_time, cpu_temp, cpu_usage, mem_usage, battery_status, network_info):
+def get_disk_usage():
+    return str(round(psutil.disk_usage('/').used / (1024.0 ** 3), 1))
+
+def draw_display(current_time, cpu_temp, cpu_usage, mem_usage, battery_status, network_info, disk_usage, script_info):
     """Draw system information on the OLED display."""
     image = Image.new(mode='1', size=(disp.width, disp.height), color="WHITE")
     draw = ImageDraw.Draw(image)
 
     draw.text((LEFT_PADDING, 0), f"{current_time} | {battery_status}", font=font, fill=0)
     draw.text((LEFT_PADDING, FONT_SIZE), f"{cpu_usage} | {cpu_temp}", font=font, fill=0)
-    draw.text((LEFT_PADDING, 2 * FONT_SIZE), mem_usage, font=font, fill=0)
+    draw.text((LEFT_PADDING, 2 * FONT_SIZE), f'{mem_usage} | D: {disk_usage}G', font=font, fill=0)
     draw.text((LEFT_PADDING, 3 * FONT_SIZE), network_info, font=font, fill=0)
+    draw.text((LEFT_PADDING, 4 * FONT_SIZE), script_info, font=font, fill=0)
 
-    return image.rotate(180)
+    return image
 
 def create_pid_file():
     """Create or remove a PID file for the script."""
@@ -95,23 +100,37 @@ def create_pid_file():
     except Exception as e:
         logging.error(f"Error creating PID file: {e}")
         
-def get_ip_address():
-    ipaddress = os.popen("ifconfig wlan0 \
-                     | grep -o 'inet [0-9.]\+' \
-                     | awk '{print $2}'").read()
-    return ipaddress
-
-def get_wlan_ssid():
-    ssid = os.popen("iwconfig wlan0 \
-                | grep 'ESSID' \
-                | awk '{print $4}' \
-                | awk -F\\\" '{print $2}'").read()
-    return ssid
+def validate_ip(s):
+    a = s.split('.')
+    if len(a) != 4:
+        return False
+    for x in a:
+        if not x.isdigit():
+            return False
+        i = int(x)
+        if i < 0 or i > 255:
+            return False
+    return True    
         
+def get_ip_address():
+    ipaddress = psutil.net_if_addrs()['wlan0'][0].address
+    return replace_ip(ipaddress) if validate_ip(ipaddress) else ''
+
 def get_network_info():
     ip = get_ip_address()
-    ssid = get_wlan_ssid()
-    return (f'wlan0: {ip}' if ip and ssid else 'wlan0: n/a').upper()
+    return (f'wlan0: {ip}' if ip else 'wlan0: n/a').upper()
+
+def replace_ip(ip_address):
+    # Use a regular expression to match the first two numbers in the IP address
+    replaced_ip = re.sub(r'^\d+\.\d+', '*.*', ip_address)
+    return replaced_ip
+
+def get_script_info(process):
+    # Get memory usage in bytes
+    memory_usage = process.memory_info().rss
+    # Get CPU usage in percentage
+    cpu_usage = process.cpu_percent(interval=None)  # interval can be adjusted
+    return f'M: {memory_usage / (1024 * 1024):.1f} MB | CPU: {cpu_usage}%'
 
 def main():
     create_pid_file()
@@ -122,17 +141,23 @@ def main():
     chip = gpiod.Chip('gpiochip4')
     pld_line = chip.get_line(PLD_PIN)
     pld_line.request(consumer="PLD", type=gpiod.LINE_REQ_DIR_IN)
+    process = psutil.Process(os.getpid())
 
     while True:
         ac_power_state = pld_line.get_value()
         battery_info = get_battery_info(bus, ac_power_state)
         current_time, cpu_temp, cpu_usage, mem_usage = get_system_info()
         network_info = get_network_info()
+        sleep_time = SLEEP_TIME_AC if ac_power_state else SLEEP_TIME_BAT
+        disk_usage = get_disk_usage()
+        script_info = get_script_info(process)
 
-        image = draw_display(current_time, cpu_temp, cpu_usage, mem_usage, battery_info, network_info)
+        image = draw_display(current_time, cpu_temp, cpu_usage, mem_usage, battery_info, network_info, disk_usage, script_info)
         disp.show_image(disp.get_buffer(image))
 
-        time.sleep(SLEEP_TIME_AC if ac_power_state else SLEEP_TIME_BAT)
+        del image, current_time, cpu_temp, cpu_usage, mem_usage, battery_info, network_info, disk_usage, script_info
+
+        time.sleep(sleep_time)
 
 if __name__ == "__main__":
     main()
