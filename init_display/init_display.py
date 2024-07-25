@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 # Constants
 FONT_SIZE = 11
-LEFT_PADDING = 1
+LEFT_PADDING = 0
 SM_BUS = 1
 PLD_PIN = 6
 ADDRESS = 0x36
@@ -28,7 +28,9 @@ BAT_THRESHOLD_HIGH = 70
 BAT_THRESHOLD_MEDIUM = 50
 BAT_THRESHOLD_LOW = 30
 BAT_THRESHOLD_CRIT = 15
-
+BYTES_IN_GYGABYTES = 1024.0 ** 3
+DISPLAY_WIDTH = 128
+DISPLAY_HEIGHT = 64
 # Directories
 script_path = os.path.realpath(__file__)
 picdir = os.path.join(os.path.dirname(script_path), 'pic')
@@ -72,34 +74,45 @@ def get_battery_info(ac_power_state, capacity):
 
 def get_cpu_temp():
     """CPU temperature."""
-    cpu_temp =  subprocess.check_output(['vcgencmd', 'measure_temp']).decode("utf-8").strip().replace('temp=', 't: ').upper()
+    cpu_temp = subprocess.check_output(['vcgencmd', 'measure_temp']).decode("utf-8").strip().replace('temp=', 't: ')
     return cpu_temp
 
 
 def get_cpu_usage():
     """CPU usage."""
-    cpu_usage = f'CPU: {psutil.cpu_percent(interval=None)}%'
-    return cpu_usage
+    cpu_usage = psutil.cpu_percent(interval=None)
+    return f'CPU:  {cpu_usage}%'
 
 
 def get_mem_usage():
     """Fetch memory usage."""
-    mem_usage = f'MEM: {psutil.virtual_memory().percent}%'
-    return mem_usage
+    return psutil.virtual_memory().percent
 
 
-def get_disk_usage():
-    return str(round(psutil.disk_usage('/').used / (1024.0 ** 3), 1))
+def get_mem_info():
+    """Fetch memory usage."""
+    memory = psutil.virtual_memory()
+    used_memory = str(round(memory.used / BYTES_IN_GYGABYTES, 1))
+    used_memory_percent = str(round(memory.percent, 1))
+    free_memory = str(round(memory.free / BYTES_IN_GYGABYTES, 1))
+    return f'MEM: {used_memory}G/{used_memory_percent}%/{free_memory}G'
 
 
-def draw_display(current_time, cpu_temp, cpu_usage, mem_usage, battery_status, network_info, disk_usage):
+def get_disk_info():
+    all_info = psutil.disk_usage('/')
+    total_space = str(round(all_info.total / BYTES_IN_GYGABYTES, 1))
+    used_space = str(round(all_info.used / BYTES_IN_GYGABYTES, 1))
+    used_space_percent = str(round(all_info.percent, 1))
+    return f'SSD: {used_space}G ({used_space_percent}%)/{total_space}G'
+
+
+def draw_display_by_lines(lines):
     """Draw system information on the OLED display."""
-    image = Image.new(mode='1', size=(disp.width, disp.height), color="WHITE")
+    image = Image.new(mode='1', size=(DISPLAY_WIDTH, DISPLAY_HEIGHT), color="WHITE")
     draw = ImageDraw.Draw(image)
-    draw.text((LEFT_PADDING, 0), f"{current_time} | {battery_status}", font=font)
-    draw.text((LEFT_PADDING, FONT_SIZE), f"{cpu_usage} | {cpu_temp}", font=font)
-    draw.text((LEFT_PADDING, 2 * FONT_SIZE), f'{mem_usage} | D: {disk_usage}G', font=font)
-    draw.text((LEFT_PADDING, 3 * FONT_SIZE), network_info, font=font)
+    if lines:
+        for index, line in enumerate(lines):
+            draw.text((LEFT_PADDING, index * FONT_SIZE), line.upper(), font=font)
     return image
 
 
@@ -131,7 +144,7 @@ def validate_ip(s):
 
 
 def get_network_info():
-    return (f'eth0: {psutil.net_if_addrs()["eth0"][0].address}' if psutil.net_if_stats()['eth0'].isup else 'eth0: n/a').upper()
+    return (f'eth0: {psutil.net_if_addrs()["eth0"][0].address}' if psutil.net_if_stats()['eth0'].isup else 'eth0: n/a')
 
 
 def get_script_info(process):
@@ -161,7 +174,9 @@ def check_shutdown_status(ac_status, battery_capacity):
 
 def make_shutdown(ac_power_state, capacity):
     logging.error(f"{get_current_datetime()}: AC {ac_power_state} battery capacity is {capacity}, performing a shutdown...")
+    disp.module_exit()
     os.system("shutdown now -h")
+    sys.exit()
     exit()
 
 
@@ -170,33 +185,45 @@ def get_current_datetime():
 
 
 def main():
-    create_pid_file()
+    try:
+        create_pid_file()
+        bus = smbus.SMBus(SM_BUS)
+        time.sleep(1)
 
-    bus = smbus.SMBus(SM_BUS)
-    time.sleep(1)
+        chip = gpiod.Chip('gpiochip4')
+        pld_line = chip.get_line(PLD_PIN)
+        pld_line.request(consumer="PLD", type=gpiod.LINE_REQ_DIR_IN)
 
-    chip = gpiod.Chip('gpiochip4')
-    pld_line = chip.get_line(PLD_PIN)
-    pld_line.request(consumer="PLD", type=gpiod.LINE_REQ_DIR_IN)
+        disk_usage = get_disk_info()
 
-    disk_usage = get_disk_usage()
+        while True:
+            ac_power_state = pld_line.get_value()
+            capacity = int(read_capacity(bus))
+            if check_shutdown_status(ac_power_state, capacity) == True:
+                make_shutdown()
+            battery_info = get_battery_info(ac_power_state, capacity)
+            current_time = get_current_datetime()
+            cpu_temp = get_cpu_temp()
+            cpu_usage = get_cpu_usage()
+            mem_usage = get_mem_info()
+            network_info = get_network_info()
 
-    while True:
-        ac_power_state = pld_line.get_value()
-        capacity = int(read_capacity(bus))
-        if check_shutdown_status(ac_power_state, capacity) == True:
-            make_shutdown()
-        battery_info = get_battery_info(ac_power_state, capacity)
-        current_time = get_current_datetime()
-        cpu_temp = get_cpu_temp()
-        cpu_usage = get_cpu_usage()
-        mem_usage = get_mem_usage()
-        network_info = get_network_info()
+            lines = [
+                f'{current_time} | {battery_info}',
+                f'{cpu_usage} | {cpu_temp}',
+                mem_usage,
+                disk_usage,
+                network_info,
+            ]
 
-        image = draw_display(current_time, cpu_temp, cpu_usage, mem_usage, battery_info, network_info, disk_usage)
-        disp.show_image(disp.get_buffer(image))
-        time.sleep(SLEEP_TIME_AC if ac_power_state else SLEEP_TIME_BAT)
-
+            image = draw_display_by_lines(lines)
+            disp.show_image(disp.get_buffer(image))
+            time.sleep(SLEEP_TIME_AC if ac_power_state else SLEEP_TIME_BAT)
+    except IOError as e:
+        logging.error(f"IOError: {e}")
+    except KeyboardInterrupt:
+        disp.module_exit()
+        sys.exit()
 
 if __name__ == "__main__":
     main()
