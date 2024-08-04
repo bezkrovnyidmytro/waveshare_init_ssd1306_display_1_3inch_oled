@@ -10,36 +10,53 @@ import psutil
 import struct
 import smbus
 import gpiod
+import requests
+from dateutil import parser
 from PIL import Image, ImageDraw, ImageFont
 
+
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+#logging.basicConfig(level=logging.DEBUG)
+
 
 # Constants
 FONT_SIZE = 11
-LEFT_PADDING = 0
+LEFT_PADDING = 1
 SM_BUS = 1
 PLD_PIN = 6
 ADDRESS = 0x36
 SLEEP_TIME_AC = 1
 SLEEP_TIME_BAT = 10
 
+
 BAT_THRESHOLD_HIGH = 70
 BAT_THRESHOLD_MEDIUM = 50
 BAT_THRESHOLD_LOW = 30
 BAT_THRESHOLD_CRIT = 15
+
+
 BYTES_IN_GYGABYTES = 1024.0 ** 3
+
+
 DISPLAY_WIDTH = 128
 DISPLAY_HEIGHT = 64
+
+
+HOSTNAME = 'www.dmytrobezkrovnyi.com'
+
+
 # Directories
 script_path = os.path.realpath(__file__)
 picdir = os.path.join(os.path.dirname(script_path), 'pic')
 libdir = os.path.join(os.path.dirname(script_path), 'lib')
 
+
 if os.path.exists(libdir):
     sys.path.append(libdir)
 
+
 from waveshare_OLED import OLED_1in3
+
 
 # Initialize font and display
 font = ImageFont.truetype(os.path.join(picdir, 'Font.ttc'), FONT_SIZE)
@@ -81,7 +98,7 @@ def get_cpu_temp():
 def get_cpu_usage():
     """CPU usage."""
     cpu_usage = psutil.cpu_percent(interval=None)
-    return f'CPU:  {cpu_usage}%'
+    return f'CPU: {cpu_usage}%'
 
 
 def get_mem_usage():
@@ -92,18 +109,18 @@ def get_mem_usage():
 def get_mem_info():
     """Fetch memory usage."""
     memory = psutil.virtual_memory()
-    used_memory = str(round(memory.used / BYTES_IN_GYGABYTES, 1))
-    used_memory_percent = str(round(memory.percent, 1))
-    free_memory = str(round(memory.free / BYTES_IN_GYGABYTES, 1))
-    return f'MEM: {used_memory}G/{used_memory_percent}%/{free_memory}G'
+    used_memory = round(memory.used / BYTES_IN_GYGABYTES, 1)
+    used_memory_percent = round(memory.percent, 1)
+    free_memory = round(memory.free / BYTES_IN_GYGABYTES, 1)
+    return f'MEM: {used_memory}G / {used_memory_percent}% / {free_memory}G'
 
 
 def get_disk_info():
     all_info = psutil.disk_usage('/')
-    total_space = str(round(all_info.total / BYTES_IN_GYGABYTES, 1))
-    used_space = str(round(all_info.used / BYTES_IN_GYGABYTES, 1))
-    used_space_percent = str(round(all_info.percent, 1))
-    return f'SSD: {used_space}G ({used_space_percent}%)/{total_space}G'
+    total_space = int(all_info.total / BYTES_IN_GYGABYTES)
+    used_space = round(all_info.used / BYTES_IN_GYGABYTES, 1)
+    used_space_percent = round(all_info.percent, 1)
+    return f'SSD: {used_space}G / {used_space_percent}% / {total_space}G'
 
 
 def draw_display_by_lines(lines):
@@ -113,7 +130,7 @@ def draw_display_by_lines(lines):
     if lines:
         for index, line in enumerate(lines):
             draw.text((LEFT_PADDING, index * FONT_SIZE), line.upper(), font=font)
-    return image
+    return image.rotate(180)
 
 
 def create_pid_file():
@@ -143,8 +160,25 @@ def validate_ip(s):
     return True
 
 
+def is_host_pingable(host):
+    try:
+        response = requests.get("https://" + host)
+        return response.status_code == 200
+    except requests.ConnectionError:
+        return False
+
+
+def replace_ip(ip):
+    if not ip or ip.count('.') <= 0:
+        return ''
+    parts = ip.split('.')
+    return f'*.*.{parts[2]}.{parts[3]}'
+
+
 def get_network_info():
-    return (f'eth0: {psutil.net_if_addrs()["eth0"][0].address}' if psutil.net_if_stats()['eth0'].isup else 'eth0: n/a')
+    connection_status = replace_ip(psutil.net_if_addrs()["eth0"][0].address) if psutil.net_if_stats()['eth0'].isup else 'n/a'
+    www_status = u'\u2713' if is_host_pingable(HOSTNAME) else 'X'
+    return (f'eth0: {connection_status} | www: {www_status}')
 
 
 def get_script_info(process):
@@ -165,11 +199,11 @@ def get_battery_capacity_label(value):
             return "L"
         case _ if value < BAT_THRESHOLD_LOW and value >= BAT_THRESHOLD_CRIT:
             return "C"
-    return "!"
+    return "!!"
 
 
 def check_shutdown_status(ac_status, battery_capacity):
-    return ac_status != 1 and BAT_THRESHOLD_LOW > battery_capacity >= BAT_THRESHOLD_CRIT
+    return (ac_status != 1 and BAT_THRESHOLD_LOW > battery_capacity >= BAT_THRESHOLD_CRIT)
 
 
 def make_shutdown(ac_power_state, capacity):
@@ -181,6 +215,12 @@ def make_shutdown(ac_power_state, capacity):
 
 
 def get_current_datetime():
+    date_str = subprocess.check_output(['sudo', 'hwclock', '-r'])
+    if date_str:
+        # Преобразование строки в объект datetime
+        date_obj = parser.parse(date_str)
+        # Преобразование объекта datetime в строку с нужным форматом
+        return date_obj.strftime('%d-%m-%y %H:%M')
     return datetime.datetime.now().strftime('%d-%m-%y %H:%M')
 
 
@@ -200,7 +240,7 @@ def main():
             ac_power_state = pld_line.get_value()
             capacity = int(read_capacity(bus))
             if check_shutdown_status(ac_power_state, capacity) == True:
-                make_shutdown()
+                make_shutdown(ac_power_state, capacity)
             battery_info = get_battery_info(ac_power_state, capacity)
             current_time = get_current_datetime()
             cpu_temp = get_cpu_temp()
