@@ -25,8 +25,11 @@ LEFT_PADDING = 1
 SM_BUS = 1
 PLD_PIN = 6
 ADDRESS = 0x36
-SLEEP_TIME_AC = 1
+
+
+SLEEP_TIME_AC = 0.5
 SLEEP_TIME_BAT = 10
+SLEEP_TIME_POWERSAVE = 20
 
 
 BAT_THRESHOLD_HIGH = 70
@@ -206,6 +209,10 @@ def check_shutdown_status(ac_status, battery_capacity):
     return (ac_status != 1 and BAT_THRESHOLD_LOW > battery_capacity >= BAT_THRESHOLD_CRIT)
 
 
+def check_powersave_status(ac_status, battery_capacity):
+    return (ac_status != 1 and BAT_THRESHOLD_MEDIUM > battery_capacity >= BAT_THRESHOLD_LOW)
+
+
 def make_shutdown(ac_power_state, capacity):
     logging.error(f"{get_current_datetime()}: AC {ac_power_state} battery capacity is {capacity}, performing a shutdown...")
     disp.module_exit()
@@ -258,7 +265,18 @@ def main():
 
             image = draw_display_by_lines(lines)
             disp.show_image(disp.get_buffer(image))
-            time.sleep(SLEEP_TIME_AC if ac_power_state else SLEEP_TIME_BAT)
+
+            sleep_time = 1
+
+            if ac_power_state == 1:
+                sleep_time = SLEEP_TIME_AC
+            elif check_powersave_status(ac_power_state, capacity):
+                sleep_time = SLEEP_TIME_POWERSAVE
+            else:
+                sleep_time = SLEEP_TIME_BAT
+
+            time.sleep(sleep_time)
+
     except IOError as e:
         logging.error(f"IOError: {e}")
     except KeyboardInterrupt:
